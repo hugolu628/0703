@@ -1,0 +1,25 @@
+[project]
+name = "0703"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi[standard]>=0.139.2",
+    "gradio>=6.20.0",
+    "joblib>=1.5.3",
+    "jupyter>=1.1.1",
+    "mglearn>=0.2.0",
+    "node>=2.0.0",
+    "npm>=0.1.1",
+    "openapi>=2.0.0",
+    "pydantic>=2.13.4",
+    "scikit-learn>=1.9.0",
+    "uvicorn>=0.51.0",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.39.9",
+    "jupyterlab-lsp>=5.3.0",
+]

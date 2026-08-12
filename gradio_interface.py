@@ -1,8 +1,9 @@
-import gradio as gr
+import os
 import requests
+import gradio as gr
 
-# FastAPI 端點 URL (假設與 Gradio 在同一台機器，使用 localhost)
-BASE_URL = "http://127.0.0.1:8000"
+# 建議改從環境變數讀取 FastAPI 網址，若沒設定則預設使用 localhost
+BASE_URL = os.environ.get("API_URL", "http://127.0.0.1:8000")
 
 def predict_salary(years_experience, education_level, city):
     """呼叫 FastAPI 的 /predict 端點來進行預測"""
@@ -15,7 +16,7 @@ def predict_salary(years_experience, education_level, city):
         response = requests.post(f"{BASE_URL}/predict", json=payload)
         if response.status_code == 200:
             data = response.json()
-            return f"${data['predicted_salary']:,.2f}", f"${data['estimated_annual_salary']:,.2f}" # 注意：原 app.py 欄位名是 estimated_annual_salary (少了一個 y?) -> 查看原始碼
+            return f"${data['predicted_salary']:,.2f}", f"${data['estimated_annual_salary']:,.2f}"
         else:
             return f"Error: {response.status_code}", "N/A"
     except Exception as e:
@@ -42,8 +43,8 @@ def train_model(test_size, random_state, model_type, alpha):
     except Exception as e:
         return f"❌ 連線錯誤: {str(e)}"
 
-# 定義 Gradio UI
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+# 1. 移除 Blocks 裡的 theme 參數 (解決 Gradio 6.0 警告)
+with gr.Blocks() as demo:
     gr.Markdown("# 💰 薪資預測系統 (Salary Predictor with FastAPI & Gradio)")
     
     with gr.Tabs():
@@ -88,4 +89,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             )
 
 if __name__ == "__main__":
-    demo.launch()
+    # 2. 讀取 Render 分配的 PORT，並指定 server_name="0.0.0.0" 讓 Render 偵測到開放的 Port
+    port = int(os.environ.get("PORT", 7860))
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        theme=gr.themes.Soft()
+    )

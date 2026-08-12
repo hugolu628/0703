@@ -2,7 +2,7 @@ import uvicorn
 import threading
 import time
 import sys
-from app import app
+from salary_app import app
 
 def run_fastapi():
     """在獨立執行緒中啟動 FastAPI"""
@@ -11,7 +11,7 @@ def run_fastapi():
 def run_gradio():
     """啟動 Gradio 介面"""
     # Import inside function to avoid issues with execution order if necessary
-    from gradio_interface import demo
+    from salary_interface import demo
     print("🚀 Gradio 介面正在啟動於 http://127.0.0.1:7860")
     demo.launch(server_name="127.0.0.1", server_port=7860)
 

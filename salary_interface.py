@@ -1,3 +1,4 @@
+import os
 import gradio as gr
 import requests
 
@@ -43,7 +44,7 @@ def train_model(test_size, random_state, model_type, alpha):
         return f"❌ 連線錯誤: {str(e)}"
 
 # 定義 Gradio UI
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+with gr.Blocks() as demo:
     gr.Markdown("# 💰 薪資預測系統 (Salary Predictor with FastAPI & Gradio)")
     
     with gr.Tabs():
@@ -87,5 +88,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 outputs=t_result
             )
 
+port = int(os.environ.get("PORT", 10000))
+
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port
+    )

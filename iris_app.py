@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 from typing import Optional
@@ -7,15 +8,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
+import gradio as gr
 import joblib
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html
-import gradio as gr
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 # 1. 載入模型與狀態管理
 model_path = os.path.join(current_dir, "iris_model.joblib")
 MODEL_STATE = {}
+
 
 def load_model_state():
     global MODEL_STATE
@@ -23,6 +26,7 @@ def load_model_state():
         print("未檢測到模型檔案，正在自動執行訓練以生成 iris_model.joblib...")
         try:
             from iris_train_save import train_and_save_model
+
             train_and_save_model()
         except Exception as e:
             raise RuntimeError(f"自動訓練模型失敗: {str(e)}")
@@ -30,29 +34,36 @@ def load_model_state():
     # 載入模型與相關元數據
     model_data = joblib.load(model_path)
     MODEL_STATE.clear()
-    MODEL_STATE.update({
-        "model": model_data["model"],
-        "target_names": model_data["target_names"],
-        "feature_names": model_data.get("feature_names", ["sepal length", "sepal width", "petal length", "petal width"]),
-        "feature_importances": model_data.get("feature_importances", {}),
-        "accuracy": model_data.get("accuracy", 0.9667),
-        "train_time": model_data.get("train_time", 0.01),
-        "n_estimators": model_data.get("n_estimators", 100),
-        "max_depth": model_data.get("max_depth", None),
-        "test_size": model_data.get("test_size", 0.2),
-        "random_state": model_data.get("random_state", 42),
-    })
+    MODEL_STATE.update(
+        {
+            "model": model_data["model"],
+            "target_names": model_data["target_names"],
+            "feature_names": model_data.get(
+                "feature_names",
+                ["sepal length", "sepal width", "petal length", "petal width"],
+            ),
+            "feature_importances": model_data.get("feature_importances", {}),
+            "accuracy": model_data.get("accuracy", 0.9667),
+            "train_time": model_data.get("train_time", 0.01),
+            "n_estimators": model_data.get("n_estimators", 100),
+            "max_depth": model_data.get("max_depth", None),
+            "test_size": model_data.get("test_size", 0.2),
+            "random_state": model_data.get("random_state", 42),
+        }
+    )
     print("模型與類別標籤成功載入！目前準確度：", MODEL_STATE["accuracy"])
+
 
 # 啟動時先載入一次狀態
 load_model_state()
 
 # 2. 建立 FastAPI 應用與 Pydantic 格式定義
-api_app = FastAPI(
+app = FastAPI(
     title="Iris 鳶尾花機器學習服務 API",
     description="這是一個結合 FastAPI 與 Gradio 的機器學習部署服務。提供預測端點與線上訓練端點。",
     version="2.0.0",
 )
+
 
 # --- Pydantic 預測模型 ---
 class IrisInput(BaseModel):
@@ -72,15 +83,19 @@ class IrisInput(BaseModel):
         }
     }
 
+
 class IrisOutput(BaseModel):
     prediction_id: int = Field(..., description="預測類別 ID")
     prediction_label: str = Field(..., description="預測類別名稱")
     probabilities: dict[str, float] = Field(..., description="各類別預測機率")
 
+
 # --- Pydantic 訓練模型 ---
 class TrainConfig(BaseModel):
     n_estimators: int = Field(100, description="決策樹數量", ge=10, le=500)
-    max_depth: Optional[int] = Field(None, description="最大深度 (None/0 表示無限制)", ge=0, le=20)
+    max_depth: Optional[int] = Field(
+        None, description="最大深度 (None/0 表示無限制)", ge=0, le=20
+    )
     test_size: float = Field(0.2, description="測試集分割比例", ge=0.1, le=0.5)
     random_state: int = Field(42, description="隨機種子", ge=0)
 
@@ -90,26 +105,34 @@ class TrainConfig(BaseModel):
                 "n_estimators": 100,
                 "max_depth": 10,
                 "test_size": 0.2,
-                "random_state": 42
+                "random_state": 42,
             }
         }
     }
+
 
 class TrainResult(BaseModel):
     status: str = Field(..., description="執行結果狀態")
     accuracy: float = Field(..., description="測試集準確度")
     train_time: float = Field(..., description="訓練耗時 (秒)")
-    feature_importances: dict[str, float] = Field(..., description="各特徵之重要性分佈")
+    feature_importances: dict[str, float] = Field(
+        ..., description="各特徵之重要性分佈"
+    )
     message: str = Field(..., description="提示訊息")
 
 
 # --- FastAPI 路由端點 ---
 
-@api_app.post("/predict", response_model=IrisOutput)
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """根目錄預設重導向至 Gradio UI 介面"""
+    return RedirectResponse(url="/ui")
+
+
+@app.post("/predict", response_model=IrisOutput)
 def predict_api(payload: IrisInput):
-    """
-    預測端點：接收鳶尾花的 4 項特徵，並回傳模型預測的類別與機率分佈。
-    """
+    """預測端點：接收鳶尾花的 4 項特徵，並回傳模型預測的類別與機率分佈。"""
     features = [
         [
             payload.sepal_length,
@@ -137,38 +160,42 @@ def predict_api(payload: IrisInput):
         raise HTTPException(status_code=500, detail=f"預測失敗: {str(e)}")
 
 
-@api_app.post("/train", response_model=TrainResult)
+@app.post("/train", response_model=TrainResult)
 def train_api(config: TrainConfig):
-    """
-    訓練端點：傳入決策樹數量、最大深度、測試集比例等超參數，線上重新訓練模型，並即時更新服務所使用的模型。
-    """
+    """訓練端點：傳入決策樹數量、最大深度、測試集比例等超參數，線上重新訓練模型，並即時更新服務所使用的模型。"""
     try:
         from iris_train_save import train_and_save_model
-        
+
         # 轉換 max_depth 為實體值 (0 代表 None)
-        depth_val = None if config.max_depth == 0 or config.max_depth is None else config.max_depth
-        
+        depth_val = (
+            None
+            if config.max_depth == 0 or config.max_depth is None
+            else config.max_depth
+        )
+
         res = train_and_save_model(
             n_estimators=config.n_estimators,
             max_depth=depth_val,
             test_size=config.test_size,
-            random_state=config.random_state
+            random_state=config.random_state,
         )
-        
+
         # 線上重新載入最新模型狀態
         load_model_state()
         return TrainResult(**res)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"線上訓練失敗: {str(e)}")
 
+
 # 3. 建立 Gradio UI 網頁介面 (Web UI)
 # --- 輔助 HTML 生成函數 ---
+
 
 def make_prediction_card(label: str, prob: float) -> str:
     color_map = {
         "setosa": ("#e6f4ea", "#137333", "🌿 Setosa (山鳶尾)"),
         "versicolor": ("#fef7e0", "#b06000", "🍁 Versicolor (變色鳶尾)"),
-        "virginica": ("#fce8e6", "#c5221f", "🪻 Virginica (維吉尼亞鳶尾)")
+        "virginica": ("#fce8e6", "#c5221f", "🪻 Virginica (維吉尼亞鳶尾)"),
     }
     bg, fg, name = color_map.get(label, ("#f8f9fa", "#212529", label))
     return f"""
@@ -179,11 +206,12 @@ def make_prediction_card(label: str, prob: float) -> str:
     </div>
     """
 
+
 def make_probability_bars(prob_dict: dict[str, float]) -> str:
     color_scheme = {
         "setosa": "#137333",
         "versicolor": "#b06000",
-        "virginica": "#c5221f"
+        "virginica": "#c5221f",
     }
     html = '<div style="margin-top: 10px; display: flex; flex-direction: column; gap: 14px;">'
     for cls, val in prob_dict.items():
@@ -200,10 +228,13 @@ def make_probability_bars(prob_dict: dict[str, float]) -> str:
             </div>
         </div>
         """
-    html += '</div>'
+    html += "</div>"
     return html
 
-def make_metrics_card(accuracy: float, train_time: float, n_est, m_depth, t_size) -> str:
+
+def make_metrics_card(
+    accuracy: float, train_time: float, n_est, m_depth, t_size
+) -> str:
     m_depth_str = "無限制" if m_depth is None or m_depth == 0 else str(m_depth)
     return f"""
     <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px;">
@@ -226,17 +257,20 @@ def make_metrics_card(accuracy: float, train_time: float, n_est, m_depth, t_size
     </div>
     """
 
+
 def make_importance_chart(importance_dict: dict[str, float]) -> str:
     if not importance_dict:
         return "<p style='color: #5f6368; text-align: center; padding: 20px;'>目前無特徵重要性資料</p>"
-    
-    sorted_imp = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
+
+    sorted_imp = sorted(
+        importance_dict.items(), key=lambda x: x[1], reverse=True
+    )
     max_val = max(importance_dict.values()) if importance_dict else 1.0
     colors = ["#1a73e8", "#ab47bc", "#137333", "#e37400"]
-    
+
     html = '<div style="margin-top: 15px; display: flex; flex-direction: column; gap: 12px;">'
     html += '<h4 style="margin: 0 0 8px 0; font-size: 1.1rem; font-weight: 700; color: #202124; letter-spacing: 0.3px;">💡 特徵重要性分析 (Feature Importance)</h4>'
-    
+
     for idx, (feature, val) in enumerate(sorted_imp):
         pct = (val / max_val) * 100
         color = colors[idx % len(colors)]
@@ -251,82 +285,79 @@ def make_importance_chart(importance_dict: dict[str, float]) -> str:
             </div>
         </div>
         """
-    html += '</div>'
+    html += "</div>"
     return html
 
 
 # --- Gradio 事件處理器 ---
 
+
 def predict_gradio_handler(sepal_len, sepal_wid, petal_len, petal_wid):
-    """
-    處理 Gradio UI 的預測請求。
-    """
+    """處理 Gradio UI 的預測請求。"""
     features = [[sepal_len, sepal_wid, petal_len, petal_wid]]
-    
+
     model = MODEL_STATE["model"]
     target_names = MODEL_STATE["target_names"]
-    
+
     pred_id = int(model.predict(features)[0])
     pred_label = target_names[pred_id]
-    
+
     probs = model.predict_proba(features)[0]
     prob_dict = {target_names[i]: float(p) for i, p in enumerate(probs)}
-    
+
     card_html = make_prediction_card(pred_label, prob_dict[pred_label] * 100)
     bars_html = make_probability_bars(prob_dict)
-    
+
     return card_html, bars_html
 
 
 def train_gradio_handler(n_estimators, max_depth, test_size, random_state):
-    """
-    處理 Gradio UI 的重新訓練請求。
-    """
+    """處理 Gradio UI 的重新訓練請求。"""
     from iris_train_save import train_and_save_model
-    
+
     depth_val = None if max_depth == 0 else int(max_depth)
-    
+
     res = train_and_save_model(
         n_estimators=int(n_estimators),
         max_depth=depth_val,
         test_size=float(test_size),
-        random_state=int(random_state)
+        random_state=int(random_state),
     )
-    
+
     # 重新載入全域模型狀態
     load_model_state()
-    
+
     # 重新渲染 UI 區塊
     metrics_html = make_metrics_card(
         accuracy=MODEL_STATE["accuracy"],
         train_time=MODEL_STATE["train_time"],
         n_est=MODEL_STATE["n_estimators"],
         m_depth=MODEL_STATE["max_depth"],
-        t_size=MODEL_STATE["test_size"]
+        t_size=MODEL_STATE["test_size"],
     )
     importance_html = make_importance_chart(MODEL_STATE["feature_importances"])
     status_text = "### 📢 最新狀態: `✅ 線上重新訓練並載入成功！`"
-    
+
     return status_text, metrics_html, importance_html
 
 
 # --- 初始 UI 內容計算 ---
-initial_pred_card, initial_pred_bars = predict_gradio_handler(5.1, 3.5, 1.4, 0.2)
+initial_pred_card, initial_pred_bars = predict_gradio_handler(
+    5.1, 3.5, 1.4, 0.2
+)
 initial_metrics = make_metrics_card(
     accuracy=MODEL_STATE["accuracy"],
     train_time=MODEL_STATE["train_time"],
     n_est=MODEL_STATE["n_estimators"],
     m_depth=MODEL_STATE["max_depth"],
-    t_size=MODEL_STATE["test_size"]
+    t_size=MODEL_STATE["test_size"],
 )
 initial_importance = make_importance_chart(MODEL_STATE["feature_importances"])
 
 
 # --- 建立 Gradio UI Blocks 布局 ---
-with gr.Blocks(
-    title="🌸 Iris 鳶尾花機器學習全生命週期平台"
-) as demo:
-    
+with gr.Blocks(title="🌸 Iris 鳶尾花機器學習全生命週期平台") as demo:
+
     gr.Markdown(
         """
         # 🌸 Iris 鳶尾花機器學習全生命週期平台
@@ -335,34 +366,54 @@ with gr.Blocks(
         * ⚙️ **線上訓練分頁**：可線上調整超參數，即時呼叫後端訓練模型並查看評估結果與特徵重要性。
         """
     )
-    
+
     with gr.Tabs():
-        
+
         # --- 分頁一：即時預測 ---
         with gr.Tab("🔮 即時模型預測"):
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 1. 輸入特徵滑桿 (Features)")
-                    sepal_len = gr.Slider(minimum=0.1, maximum=10.0, value=5.1, step=0.1, label="花萼長度 Sepal Length (cm)")
-                    sepal_wid = gr.Slider(minimum=0.1, maximum=10.0, value=3.5, step=0.1, label="花萼寬度 Sepal Width (cm)")
-                    petal_len = gr.Slider(minimum=0.1, maximum=10.0, value=1.4, step=0.1, label="花瓣長度 Petal Length (cm)")
-                    petal_wid = gr.Slider(minimum=0.1, maximum=10.0, value=0.2, step=0.1, label="花瓣寬度 Petal Width (cm)")
-                    
+                    sepal_len = gr.Slider(
+                        minimum=0.1,
+                        maximum=10.0,
+                        value=5.1,
+                        step=0.1,
+                        label="花萼長度 Sepal Length (cm)",
+                    )
+                    sepal_wid = gr.Slider(
+                        minimum=0.1,
+                        maximum=10.0,
+                        value=3.5,
+                        step=0.1,
+                        label="花萼寬度 Sepal Width (cm)",
+                    )
+                    petal_len = gr.Slider(
+                        minimum=0.1,
+                        maximum=10.0,
+                        value=1.4,
+                        step=0.1,
+                        label="花瓣長度 Petal Length (cm)",
+                    )
+                    petal_wid = gr.Slider(
+                        minimum=0.1,
+                        maximum=10.0,
+                        value=0.2,
+                        step=0.1,
+                        label="花瓣寬度 Petal Width (cm)",
+                    )
+
                     predict_btn = gr.Button("🔮 開始預測", variant="primary")
-                    
+
                 with gr.Column(scale=1):
                     gr.Markdown("### 2. 預測結果與概率分析")
-                    output_card = gr.HTML(value=initial_pred_card, label="品種預測卡片")
-                    output_probs = gr.HTML(value=initial_pred_bars, label="機率分析")
-            
-            # 綁定即時變更事件 (Slider 變動時即時進行預測)
-            # queue=False：預測僅是毫秒級的 CPU 運算，不需要佇列排程。若走 Gradio 佇列，
-            #   結果會透過 SSE (Server-Sent Events) 長連線回傳；在 Render 這類會緩衝長連線的
-            #   反向代理環境下，拖動滑桿時每一格都得走「建立 SSE → 排隊 → 回傳 → 關閉」一輪，
-            #   畫面會顯示 `queue: 1/1` 且反應明顯延遲。改走一般 HTTP 請求即可恢復即時回饋。
-            # show_progress="hidden"：Gradio 6 的事件預設 show_progress="full"，會在每次滑桿
-            #   變動時於右邊輸出元件蓋上一層載入/進度動畫。快速拖動時每一格都閃一次覆蓋層，
-            #   看起來就像卡在 queue。設為 hidden 後長條可平順即時更新，不再閃爍。
+                    output_card = gr.HTML(
+                        value=initial_pred_card, label="品種預測卡片"
+                    )
+                    output_probs = gr.HTML(
+                        value=initial_pred_bars, label="機率分析"
+                    )
+
             inputs = [sepal_len, sepal_wid, petal_len, petal_wid]
             outputs = [output_card, output_probs]
             for slider in inputs:
@@ -380,31 +431,57 @@ with gr.Blocks(
                 queue=False,
                 show_progress="hidden",
             )
-            
+
         # --- 分頁二：線上訓練 ---
         with gr.Tab("⚙️ 線上模型訓練與評估"):
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 1. 調整隨機森林超參數")
-                    n_est = gr.Slider(minimum=10, maximum=500, value=MODEL_STATE["n_estimators"], step=10, label="決策樹樹量 (n_estimators)")
-                    m_depth = gr.Slider(minimum=0, maximum=20, value=MODEL_STATE["max_depth"] if MODEL_STATE["max_depth"] is not None else 0, step=1, label="最大深度 (max_depth) - 設為 0 表示無限制")
-                    t_size = gr.Slider(minimum=0.1, maximum=0.5, value=MODEL_STATE["test_size"], step=0.05, label="測試集比例 (test_size)")
-                    seed = gr.Number(value=MODEL_STATE["random_state"], label="隨機種子 (random_state)", precision=0)
-                    
+                    n_est = gr.Slider(
+                        minimum=10,
+                        maximum=500,
+                        value=MODEL_STATE["n_estimators"],
+                        step=10,
+                        label="決策樹樹量 (n_estimators)",
+                    )
+                    m_depth = gr.Slider(
+                        minimum=0,
+                        maximum=20,
+                        value=(
+                            MODEL_STATE["max_depth"]
+                            if MODEL_STATE["max_depth"] is not None
+                            else 0
+                        ),
+                        step=1,
+                        label="最大深度 (max_depth) - 設為 0 表示無限制",
+                    )
+                    t_size = gr.Slider(
+                        minimum=0.1,
+                        maximum=0.5,
+                        value=MODEL_STATE["test_size"],
+                        step=0.05,
+                        label="測試集比例 (test_size)",
+                    )
+                    seed = gr.Number(
+                        value=MODEL_STATE["random_state"],
+                        label="隨機種子 (random_state)",
+                        precision=0,
+                    )
+
                     train_btn = gr.Button("🚀 開始訓練模型", variant="primary")
-                    
+
                 with gr.Column(scale=1):
                     gr.Markdown("### 2. 訓練結果與特徵重要性")
-                    train_status = gr.Markdown("### 📢 最新狀態: `已載入預訓練模型 (就緒)`")
-                    metrics_card = gr.HTML(value=initial_metrics, label="評估指標卡片")
-                    importance_chart = gr.HTML(value=initial_importance, label="特徵重要性圖表")
-            
-            # 綁定訓練按鈕事件
-            # queue=False：Iris 隨機森林訓練是毫秒級運算(即使 500 棵樹也 <1 秒)，
-            #   不需要佇列排程。若走 Gradio 佇列，結果會透過 SSE 長連線回傳；在 Render
-            #   這類會緩衝長連線的反向代理下，串流回不來，畫面會卡在 `queue: 1/1 | 秒數`
-            #   一直計時、右欄被灰色遮罩蓋住(結果實際上早已算完)。改走一般 HTTP 即可正常回傳。
-            # show_progress="minimal"：以頂端細進度條取代整欄的灰色載入遮罩，提供輕量回饋。
+                    train_status = gr.Markdown(
+                        "### 📢 最新狀態: `已載入預訓練模型 (就緒)`"
+                    )
+                    metrics_card = gr.HTML(
+                        value=initial_metrics, label="評估指標卡片"
+                    )
+                    importance_chart = gr.HTML(
+                        value=initial_importance, label="特徵重要性圖表"
+                    )
+
             train_btn.click(
                 fn=train_gradio_handler,
                 inputs=[n_est, m_depth, t_size, seed],
@@ -413,59 +490,27 @@ with gr.Blocks(
                 show_progress="minimal",
             )
 
-# 設定主題（避免 Gradio 6.0 的 Blocks 建構警告）
+# 設定主題與計算主題 CSS / 哈希值
 demo.theme = gr.themes.Soft(primary_hue="teal", secondary_hue="indigo")
-
-# ⚠️ 指派 demo.theme 之後，必須手動補算主題的 CSS 與雜湊值！
-# Gradio 只在 `demo.launch()` 內部才會產生 `theme_css` / `theme_hash` / `stylesheets`
-# 這三個屬性。若像本專案一樣改用 uvicorn 直接載入 app（完全不經過 launch()），
-# 它們永遠不會被建立，後果是：
-#   1. config 中的 theme_hash 為 None，前端因此請求 `/theme.css?v=null`
-#   2. `/theme.css` 路由存取 `blocks.theme_css` 時拋出 AttributeError → HTTP 500
-#   3. 瀏覽器拿不到主題樣式，整個 UI 退化成無樣式的原生 HTML
-#      （滑桿變成數字、Tab 變成純文字；但 inline style 寫死的自訂卡片仍正常顯示）
-import hashlib
-
 demo.theme_css = demo.theme._get_theme_css()
 demo.stylesheets = demo.theme._stylesheets
 demo.theme_hash = hashlib.sha256(demo.theme_css.encode("utf-8")).hexdigest()
 
-# 放寬佇列的預設併發數：
-# Gradio 的 default_concurrency_limit 預設為 1，代表同一事件同時間只能有一個在執行，
-# 其餘請求全部排隊等待。訓練按鈕仍保留佇列（長時間工作需要進度回饋），
-# 但提高上限可避免多位使用者或連續操作時互相阻塞。
 demo.queue(default_concurrency_limit=10)
 
-# ==========================================
-# 4. 融合 Gradio 與自訂 API 路由
-# ==========================================
-# 本地與 Render 皆以 uvicorn 載入 "app:app"，不經過 `demo.launch()`，
-# 因此只需在建立 Gradio 的 FastAPI 實例後，直接併入自訂路由即可，
-# 無需針對 launch() 內部重建 app 的猴子補丁 (Monkey-Patch)。
+# 4. 融合 Gradio 與自訂 API 路由 (Mount 方式)
 
-# 1. 產生 Gradio 的 FastAPI 應用實例
-app = gr.routes.App.create_app(demo)
+# 4-1. 建立 Gradio App 實例
+gradio_app = gr.routes.App.create_app(demo)
 
-# 2. 合併 API 路由：將 api_app 中的所有自訂 API 路由 (/predict, /train) 併入
-app.include_router(api_app.router)
+# 4-2. 將 Gradio 掛載至 FastAPI 主應用的 /ui 路徑
+app.mount("/ui", gradio_app)
 
-# 3. 顯式註冊被 Gradio 萬用路由隱藏的 Swagger UI 與 openapi.json
-@app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html():
-    return get_swagger_ui_html(
-        openapi_url="/openapi.json",
-        title="Iris API - Swagger UI"
-    )
-
-@app.get("/openapi.json", include_in_schema=False)
-async def get_openapi_json():
-    return app.openapi()
 
 if __name__ == "__main__":
     import uvicorn
-    # Render 會透過 PORT 環境變數指定對外埠號；本地開發預設 8000
+
     port = int(os.environ.get("PORT", 8000))
-    # 本地開發可設定環境變數 RELOAD=true 啟用熱重載；Render 生產環境維持關閉
     reload = os.environ.get("RELOAD", "").lower() == "true"
     print(f"使用 uvicorn 啟動伺服器 (port={port}, reload={reload})...")
     uvicorn.run("iris_app:app", host="0.0.0.0", port=port, reload=reload)

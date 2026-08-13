@@ -19,7 +19,7 @@ def run_gradio():
     # 取得 Render 自動指派的對外 Port，若在本地端執行則預設使用 7860
     port = int(os.environ.get("PORT", 7860))
 
-    print(f"🚀 Gradio 介面正在啟動於 0.0.0.0:{port}")
+    print(f"Gradio 介面正在啟動於 0.0.0.0:{port}")
 
     # 必須綁定 0.0.0.0 才能讓 Render Health Check 與外部流量存取
     demo.launch(server_name="0.0.0.0", server_port=port)
@@ -32,6 +32,10 @@ if __name__ == "__main__":
 
     # 給 API 一點點啟動時間
     time.sleep(2)
+
+    # 2. 啟動 Gradio（作為主要對外服務）
+    print("FastAPI 已就緒，正在開啟 Gradio UI...")
+    run_gradio()
 
     # 2. 啟動 Gradio（作為主要對外服務）
     print("🚀 FastAPI 已就緒，正在開啟 Gradio UI...")

@@ -3,15 +3,17 @@ import pandas as pd
 import time
 import joblib
 from pandas import DataFrame
-from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OrdinalEncoder,OneHotEncoder,StandardScaler
+import psycopg2
+from dotenv import load_dotenv
 from sklearn.model_selection import train_test_split
-from sklearn.linear_model import Lasso, Ridge, LinearRegression
+from sklearn.linear_model import Lasso,Ridge,LinearRegression
 
-def train_and_save_model (
-    test_size: float = 0.2,
-    random_state: int = 76,
-    model_type: str = "LinearRegression",
-    alpha: float = 1.0
+def train_and_save_model(
+    test_size:float = 0.2,
+    random_state:int = 76,
+    model_type:str = "LinearRegression",
+    alpha:float = 1.0
 ) -> dict:
     """
     訓練線性迴歸模型 (支援多元線性迴歸、Lasso 迴歸與 Ridge 嶺迴歸) 以預測薪資，
@@ -26,98 +28,118 @@ def train_and_save_model (
     回傳:
         包含訓練指標、權重與花費時間的字典。
     """
-    current_dir = os.path.dirname (os.path.abspath (__file__))    
-    csv_path: str = os.path.join (current_dir, "Salary_Data.csv")
-    if not os.path.exists (csv_path):
-        raise FileNotFoundError (f"找不到數據集檔案: {csv_path}")
+    # 設定資料來源：從 Render PostgreSQL 讀取 salary_data2
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv()
+    postgres_url = os.getenv("POSTGRES_URL")
+    if not postgres_url:
+        raise ValueError("缺少 POSTGRES_URL 環境變數！")
 
-    data:DataFrame = pd.read_csv (csv_path)
-    
-    start_time: float = time.time ( )
- 
-    oe = OrdinalEncoder (categories= [['高中以下','大學', '碩士以上']])
-    data ['EducationLevel'] = oe.fit_transform (data [['EducationLevel']])
+    query = 'SELECT "YearsExperience", "Salary", "EducationLevel", "City" FROM salary_data2;'
+    try:
+        conn = psycopg2.connect(postgres_url)
+        data: DataFrame = pd.read_sql(query, conn)
+    except Exception as e:
+        raise ValueError(f"資料庫連線或讀取失敗: {str(e)}")
+    finally:
+        conn.close()
+    # 開始的時間
+    start_time:float = time.time()
+    # ----------------------------------------------------
+    # 1. 建立並擬合 OrdinalEncoder (學歷：高中以下=0, 大學=1, 碩士以上=2)
+    # 顯式指定類別位階順序，確保高學歷對應較高數值：
+    # oe.categories_ 會是 [['高中以下', '大學', '碩士以上']] (索引 0: 高中以下, 1: 大學, 2: 碩士以上)
+    # ----------------------------------------------------
+    oe = OrdinalEncoder(categories=[['高中以下','大學', '碩士以上']])
+    data['EducationLevel'] = oe.fit_transform(data[['EducationLevel']])
 
-    from sklearn.preprocessing import OneHotEncoder
-    #display (data ['City'].unique ( ))
+    # -----------------------------------------------------
+    # 2. 建立並擬合 OneHotEncoder (城市：城市A, 城市B, 城市C)
+    # -----------------------------------------------------
+    # 直接以資料庫實際的城市類別擬合，避免硬編碼導致資料變動時欄位不一致
+    ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    ohe.fit(data[['City']])
+    city_encoded = ohe.transform(data[['City']])
+    city_cols = ohe.get_feature_names_out(['City'])
+    city_df = pd.DataFrame(city_encoded,columns=city_cols) # type: ignore
+    data = pd.concat([data,city_df],axis=1).drop('City',axis=1)
+    # 特徵欄位動態從 OneHotEncoder 產出，確保與預測端點使用的欄位一致
+    feature_names = ['YearsExperience', 'EducationLevel'] + list(city_cols)
+    X = data[feature_names]
+    y = data['Salary']
     
-    ohe = OneHotEncoder (sparse_output = False, handle_unknown = 'ignore')
-    ohe.fit (pd.DataFrame ([["城市A"], ["城市B"], ["城市C"]], columns = ["City"]))
-    city_encoded = ohe.transform (data [['City']])
-    city_cols = ohe.get_feature_names_out (['City'])
-    city_df = pd.DataFrame (city_encoded, columns = city_cols)
-    data = pd.concat ([data,city_df], axis = 1).drop ('City', axis = 1)
-
-    feature_names = ['YearsExperience', 'EducationLevel', 'City_城市A', 'City_城市B', 'City_城市C']
-    X = data [feature_names]
-    y = data ['Salary']
-    
-    X_train, X_test, y_train, y_test = train_test_split (
+    # 切分訓練集與測試集
+    X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size = test_size, random_state = random_state
     )
     
-    scaler = StandardScaler ( )
-    X_train_scaled = scaler.fit_transform (X_train)
-    X_test_scaled = scaler.transform (X_test)
+    # 特徵標準化 (對所有特徵進行)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
 
-    model_type_clean = model_type.strip ( )
-    if model_type_clean.lower ( ) == "lasso":
-        model = Lasso (alpha = alpha, random_state = random_state)
-        actual_model_name = f"Lasso 迴歸 (α = {alpha})"
-        model_type_clean = "Lasso"
-    elif model_type_clean.lower ( ) == "ridge":
-        model = Ridge (alpha = alpha, random_state = random_state)
-        actual_model_name = f"Ridge 嶺迴歸 (α = {alpha})"
-        model_type_clean = "Ridge"
+    #關於模型
+    model_type_clean = model_type.strip()
+    if model_type_clean.lower() == "lasso":
+        model = Lasso(alpha=alpha, random_state=random_state)
+        actual_model_name = f"Lasso 迴歸(α={alpha})"
+        model_type_clean="Lasso"
+    elif model_type_clean.lower() == "ridge":
+        model = Ridge(alpha=alpha, random_state=random_state)
+        actual_model_name = f"Ridge 嶺迴歸(α={alpha})"
+        model_type_clean="Ridge"
     else:
-        model = LinearRegression ( )
+        model = LinearRegression()
         actual_model_name = "多元線性迴歸 (OLS)"
-        model_type_clean = "LinearRegression"
+        model_type_clean="LinearRegression"
     
-    print (f"開始訓練 {actual_model_name} (測試集比例: {test_size}, 隨機種子: {random_state})")
-    model.fit (X_train_scaled, y_train)
+    print(f"開始訓練 {actual_model_name} (測試集比例:{test_size}, 隨機種子:{random_state})....")
+    model.fit(X_train_scaled, y_train)
     
-    train_time = time.time ( ) - start_time
+    train_time = time.time() - start_time
 
-    r2 = model.score (X_test_scaled, y_test)
+    # ----------------------------------------------------------
+    # 取得模型的權重,偏移值,評估值R2
+    # ----------------------------------------------------------
+    r2 = model.score(X_test_scaled, y_test)
     
     coefs = model.coef_
     intercept = model.intercept_
     feature_coefs = {
-        name: float (coef) for name, coef in zip (feature_names, coefs)
+        name: float(coef) for name, coef in zip(feature_names, coefs)
     }
     model_data = {
     "model": model,
     "oe": oe,
     "ohe": ohe,
     "scaler": scaler,
-    "r2": float (r2),
-    "coef": [float (c) for c in coefs],
-    "intercept": float (intercept),
+    "r2": float(r2),
+    "coef": [float(c) for c in coefs],
+    "intercept": float(intercept),
     "feature_names": feature_names,
     "feature_coefs": feature_coefs,
     "model_type": model_type_clean,
-    "alpha": float (alpha),
-    "train_time": float (train_time),
+    "alpha": float(alpha),
+    "train_time": float(train_time),
     "test_size": test_size,
     "random_state": random_state
     }
     
-    model_filename = os.path.join (current_dir, "salary_model.joblib")
-    print (f"正在將模型、預處理器與元數據序列化並儲存至 {model_filename}...")
-    joblib.dump (model_data,model_filename)
-    print ("模型儲存成功！")
+    model_filename = os.path.join(current_dir, "salary_model.joblib")
+    print(f"正在將模型、預處理器與元數據序列化並儲存至 {model_filename}...")
+    joblib.dump(model_data,model_filename)
+    print("模型儲存成功！")
     return{
         "status": "success",
-        "r2": float (r2),
-        "coef": [float (c) for c in coefs],
-        "intercept": float (intercept),
-        "feature_coefs":feature_coefs,
+        "r2": float(r2),
+        "coef": [float(c) for c in coefs],
+        "intercept": float(intercept),
         "model_type": model_type_clean,
-        "alpha": float (alpha),
-        "train_time": float (train_time),
-        "message": f"{actual_model_name} 模型訓練完成並儲存成功！"
+        "alpha": float(alpha),
+        "feature_coefs":feature_coefs,
+        "train_time": float(train_time),
+        "message":f"{actual_model_name} 模型訓練完成並儲存成功！"
     }
 
 if __name__ == "__main__":
-    train_and_save_model ( )
+    train_and_save_model()

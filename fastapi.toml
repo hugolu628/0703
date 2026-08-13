@@ -1,0 +1,4 @@
+[run]
+# Syntax: "path/to/filename.py:variable_name"
+# Based on your commit history, if your file is named iris_app.py:
+entrypoint = "iris_app.py:app"
